@@ -280,7 +280,7 @@ def main():
         num_classes = 10
     elif opt.data == 'ImageNet':
         num_classes = 25
-    elif opt.data in ['CelebA_Gender', 'CelebA_Smile']:
+    elif opt.data in ['CelebA_Gender', 'CelebA_Smile', 'CelebAHQ_Gender']:
         num_classes = 2
     elif opt.data == 'CelebA_Identity':
         num_classes = 100

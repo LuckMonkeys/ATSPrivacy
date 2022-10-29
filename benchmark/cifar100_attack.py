@@ -42,6 +42,8 @@ parser.add_argument('--tiny_data', default=False, action='store_true', help='Use
 parser.add_argument('--dryrun', default=False, action='store_true', help='Debug mode')
 parser.add_argument('--fix_ckpt', default=False, action='store_true', help='Use fix ckpt for attack')
 
+parser.add_argument('--start', default=0, type=int,  help='The start index of attack smaple')
+
 opt = parser.parse_args()
 num_images = 1
 
@@ -177,6 +179,11 @@ def main():
             dm = torch.as_tensor(inversefed.consts.imagenet_mean, **setup)[:, None, None]
             ds = torch.as_tensor(inversefed.consts.imagenet_std, **setup)[:, None, None]
             shape = (3, 224, 224)
+        
+        elif opt.data == 'CelebAHQ_Gender':
+            dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
+            ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
+            shape = (3, 256, 256)
         elif opt.data.startswith('CelebA'):
             dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
             ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
@@ -245,7 +252,7 @@ def main():
         # sample_list = [25] #debug
         
     mse_loss = 0
-    for attack_id, idx in enumerate(sample_list):
+    for attack_id, idx in enumerate(sample_list[opt.start:]):
         if idx < opt.resume:
             continue
         print('attach {}th in {}'.format(idx, opt.aug_list))

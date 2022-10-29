@@ -11,7 +11,7 @@ from ..consts import *
 
 from .data import _build_bsds_sr, _build_bsds_dn
 from .loss import Classification, PSNR
-from .datasets import CelebAForGender, CelebAForMLabel, CelebAForSmile, CelebAFaceAlignForMLabel
+from .datasets import CelebAForGender, CelebAForMLabel, CelebAForSmile, CelebAFaceAlignForMLabel, CelebaHQ_Gender
 
 
 def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, normalize=True):
@@ -48,6 +48,9 @@ def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, norma
     elif dataset == 'CelebAFaceAlign_MLabel':
         trainset, validset = _build_celeba_face_align_mlabel(path, defs.augmentations, normalize)
         loss_fn = torch.nn.BCEWithLogitsLoss()
+    elif dataset == 'CelebAHQ_Gender':
+        trainset, validset = _build_celeba_hq_gender(path, defs.augmentations, normalize)
+        loss_fn = Classification()
     elif dataset == 'BSDS-SR':
         trainset, validset = _build_bsds_sr(path, defs.augmentations, normalize, upscale_factor=3, RGB=True)
         loss_fn = PSNR()
@@ -257,7 +260,41 @@ def _build_celeba_gender(data_path, augmentations=True, normalize=True):
 
     return trainset, validset
 
+def _build_celeba_hq_gender(data_path, augmentations=True, normalize=True):
+    """Define celeba with everything considered."""
+    # Load data
+    # trainset = torchvision.datasets.ImageNet(root=data_path, split='train', transform=transforms.ToTensor())
+    # validset = torchvision.datasets.ImageNet(root=data_path, split='val', transform=transforms.ToTensor())
 
+    data_path = data_path if not os.path.exists('/home/zx/nfs/server3/data/') else '/home/zx/nfs/server3/data/'
+    # data_path = '/home/zx/data'
+    trainset = CelebaHQ_Gender(data_path, split='train', transform=transforms.ToTensor())
+    validset = CelebaHQ_Gender(data_path, split='valid', transform=transforms.ToTensor())
+
+    if celeba_mean is None:
+        data_mean, data_std = _get_meanstd(trainset)
+    else:
+        data_mean, data_std = celeba_mean, celeba_std
+
+    # Organize preprocessing
+    transform = transforms.Compose([
+        # transforms.Resize((128,128)),
+        transforms.Resize((256, 256)),
+        # transforms.CenterCrop(128),
+        transforms.ToTensor(),
+        transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
+    if augmentations:
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(256),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
+        trainset.transform = transform_train
+    else:
+        trainset.transform = transform
+    validset.transform = transform
+
+    return trainset, validset
 def _build_celeba_smile(data_path, augmentations=True, normalize=True):
     """Define celeba with everything considered."""
     # Load data
