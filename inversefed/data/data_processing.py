@@ -1,6 +1,7 @@
 """Repeatable code parts concerning data loading."""
 
 
+from curses.ascii import isdigit
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -50,6 +51,14 @@ def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, norma
         loss_fn = torch.nn.BCEWithLogitsLoss()
     elif dataset == 'CelebAHQ_Gender':
         trainset, validset = _build_celeba_hq_gender(path, defs.augmentations, normalize)
+        loss_fn = Classification()
+    elif dataset.startswith('Scale_CelebAHQ_Gender'):
+        size = dataset.split('_')[-1]
+        if size.isdigit():
+            size = (int(size), int(size))
+        else:
+            raise AttributeError(f'Error scale size, exptectd a number but got {size} ')
+        trainset, validset = _build_celeba_hq_gender(path, defs.augmentations, normalize, size=size)
         loss_fn = Classification()
     elif dataset == 'BSDS-SR':
         trainset, validset = _build_bsds_sr(path, defs.augmentations, normalize, upscale_factor=3, RGB=True)
@@ -208,12 +217,15 @@ def _build_imagenet(data_path, augmentations=True, normalize=True):
     # Organize preprocessing
     transform = transforms.Compose([
         transforms.Resize(256),
+        # transforms.Resize(128),
         transforms.CenterCrop(224),
+        # transforms.CenterCrop(112),
         transforms.ToTensor(),
         transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
     if augmentations:
         transform_train = transforms.Compose([
             transforms.RandomResizedCrop(224),
+            # transforms.RandomResizedCrop(112),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
@@ -260,7 +272,7 @@ def _build_celeba_gender(data_path, augmentations=True, normalize=True):
 
     return trainset, validset
 
-def _build_celeba_hq_gender(data_path, augmentations=True, normalize=True):
+def _build_celeba_hq_gender(data_path, augmentations=True, normalize=True, size=(256, 256)):
     """Define celeba with everything considered."""
     # Load data
     # trainset = torchvision.datasets.ImageNet(root=data_path, split='train', transform=transforms.ToTensor())
@@ -279,13 +291,14 @@ def _build_celeba_hq_gender(data_path, augmentations=True, normalize=True):
     # Organize preprocessing
     transform = transforms.Compose([
         # transforms.Resize((128,128)),
-        transforms.Resize((256, 256)),
+        transforms.Resize(size),
         # transforms.CenterCrop(128),
         transforms.ToTensor(),
         transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
     if augmentations:
         transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(256),
+            # transforms.RandomResizedCrop(256),
+            transforms.RandomResizedCrop(size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])

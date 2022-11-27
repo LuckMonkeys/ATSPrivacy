@@ -43,6 +43,11 @@ parser.add_argument('--dryrun', default=False, action='store_true', help='Debug 
 parser.add_argument('--fix_ckpt', default=False, action='store_true', help='Use fix ckpt for attack')
 
 parser.add_argument('--start', default=0, type=int,  help='The start index of attack smaple')
+parser.add_argument('--end', default=100, type=int,  help='The end index of attack smaple')
+parser.add_argument('--scale_data', default=False, action='store_true', help='Use scale data for single dataset')
+parser.add_argument('--input_shape', default=None, type=int,  help='The input shape for init image')
+
+parser.add_argument('--max_iterations', default=None, type=int,  help='Max iteration for attack')
 
 opt = parser.parse_args()
 num_images = 1
@@ -60,6 +65,8 @@ mode = opt.mode
 assert mode in ['normal', 'aug', 'crop']
 
 config = create_config(opt)
+if opt.max_iterations is not None:
+    config["max_iterations"] = opt.max_iterations
 
 def collate_fn(examples, label_key='fine_label'):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
@@ -70,6 +77,18 @@ def create_save_dir():
     if opt.fix_ckpt:
         return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_fix'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
             opt.aug_list, opt.rlabel)
+    elif opt.input_shape is not None:
+        size = opt.input_shape
+        return f'benchmark/images/data_{opt.data}_arch_{opt.arch}_epoch_{opt.epochs}_optim_{opt.optim}_mode_{opt.mode}_auglist_{opt.aug_list}_rlabel_{opt.rlabel}_input_{size}'
+    elif opt.scale_data:
+        name_and_size = opt.data.split('_')
+        name = '_'.join(name_and_size[1:-1])
+        size = name_and_size[-1]
+        save_dir = f'benchmark/images/scale_{name}/data_{name}_arch_{opt.arch}_epoch_{opt.epochs}_optim_{opt.optim}_mode_{opt.mode}_auglist_{opt.aug_list}_rlabel_{opt.rlabel}_{size}'
+        return save_dir
+    elif opt.max_iterations is not None:
+        return 'benchmark/images/Iteration/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_{}'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, opt.aug_list, opt.rlabel, opt.max_iterations)
+
     return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
         opt.aug_list, opt.rlabel)
 
@@ -127,8 +146,6 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
 
     output_denormalized = output * ds + dm
     input_denormalized = ground_truth * ds + dm
-    mean_loss = torch.mean((input_denormalized - output_denormalized) * (input_denormalized - output_denormalized))
-    print("after optimization, the true mse loss {}".format(mean_loss))
 
     save_dir = create_save_dir()
     if not os.path.exists(save_dir):
@@ -137,19 +154,24 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
     torchvision.utils.save_image(output_denormalized.cpu().clone(), '{}/rec_{}.png'.format(save_dir, idx))
     torchvision.utils.save_image(input_denormalized.cpu().clone(), '{}/ori_{}.png'.format(save_dir, idx))
 
-
-    test_mse = (output_denormalized.detach() - input_denormalized).pow(2).mean().cpu().detach().numpy()
-    if isinstance(model(output.detach()), tuple): 
-        feat_mse = (model(output.detach())[0]- model(ground_truth)[0]).pow(2).mean()
+    if opt.input_shape is not None:
+        return 0
     else:
-        feat_mse = (model(output.detach())- model(ground_truth)).pow(2).mean()
-         
-    test_psnr = inversefed.metrics.psnr(output_denormalized, input_denormalized)
+        mean_loss = torch.mean((input_denormalized - output_denormalized) * (input_denormalized - output_denormalized))
+        print("after optimization, the true mse loss {}".format(mean_loss))
 
-    return {'test_mse': test_mse,
-        'feat_mse': feat_mse.detach(), # if not, the computation graph would store in list for each iteration, case OOM error. https://discuss.pytorch.org/t/memory-leak-when-appending-tensors-to-a-list/25937 If you store something from your model (for debugging purpose) and don’t need to calculate gradients with it anymore, I would recommend to call detach on it as it won’t have any effects if the tensor is already detached.
-        'test_psnr': test_psnr
-    }
+        test_mse = (output_denormalized.detach() - input_denormalized).pow(2).mean().cpu().detach().numpy()
+        if isinstance(model(output.detach()), tuple): 
+            feat_mse = (model(output.detach())[0]- model(ground_truth)[0]).pow(2).mean()
+        else:
+            feat_mse = (model(output.detach())- model(ground_truth)).pow(2).mean()
+            
+        test_psnr = inversefed.metrics.psnr(output_denormalized, input_denormalized)
+
+        return {'test_mse': test_mse,
+            'feat_mse': feat_mse.detach(), # if not, the computation graph would store in list for each iteration, case OOM error. https://discuss.pytorch.org/t/memory-leak-when-appending-tensors-to-a-list/25937 If you store something from your model (for debugging purpose) and don’t need to calculate gradients with it anymore, I would recommend to call detach on it as it won’t have any effects if the tensor is already detached.
+            'test_psnr': test_psnr
+        }
 
 
 
@@ -157,6 +179,12 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
 def create_checkpoint_dir():
     if opt.fix_ckpt:
         return 'checkpoints/data_{}_arch_{}_mode_crop_auglist__rlabel_{}'.format(opt.data, opt.arch, opt.rlabel)
+    elif opt.scale_data:
+        name_and_size = opt.data.split('_')
+        name = '_'.join(name_and_size[1:-1])
+        size = name_and_size[-1]
+        save_dir = f'checkpoints/scale_{name}/data_{name}_arch_{opt.arch}_mode_{opt.mode}_auglist_{opt.aug_list}_rlabel_{opt.rlabel}_{size}'
+        return save_dir
     return 'checkpoints/data_{}_arch_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.mode, opt.aug_list, opt.rlabel)
 
 
@@ -184,6 +212,16 @@ def main():
             dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
             ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
             shape = (3, 256, 256)
+            # shape = (3, 112, 112)
+        elif opt.data.startswith('Scale_CelebAHQ_Gender'):
+            dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
+            ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
+
+            size = opt.data.split('_')[-1]
+            if size.isdigit():
+                shape = (3, int(size), int(size))
+            else:
+                raise AttributeError(f'Error scale size, exptectd a number but got {size} ')
         elif opt.data.startswith('CelebA'):
             dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
             ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
@@ -192,6 +230,9 @@ def main():
         
         else:
             raise NotImplementedError
+        
+        if opt.input_shape is not None:
+            shape = (3, opt.input_shape, opt.input_shape)
     else: 
         loss_fn, trainloader, validloader, model, mean_std, scale_size = vit_preprocess(opt, defs, valid=True) # batch size rescale to 16
         dm, ds = mean_std
@@ -242,17 +283,20 @@ def main():
     if os.path.exists(metric_path):
         metric_list = np.load(metric_path, allow_pickle=True).tolist()
 
-    sample_list = [i for i in range(100)]
+    sample_list = [i for i in range(opt.start, opt.end)]
 
     if opt.arch ==  'ResNet18_tv' and opt.data == 'ImageNet':
         valid_size = len(validloader.dataset)
-        sample_array = np.linspace(0, valid_size, 100, endpoint=False,dtype=np.int32)
-        sample_list = [int(i) for i in sample_array]
+        sample_array = np.linspace(0, valid_size, opt.end - opt.start, endpoint=False,dtype=np.int32)
+        sample_list = [int(i)+5 for i in sample_array]
+        # print(sample_list)
+        # print(valid_size)
+        # exit(0)
 
         # sample_list = [25] #debug
         
     mse_loss = 0
-    for attack_id, idx in enumerate(sample_list[opt.start:]):
+    for attack_id, idx in enumerate(sample_list):
         if idx < opt.resume:
             continue
         print('attach {}th in {}'.format(idx, opt.aug_list))

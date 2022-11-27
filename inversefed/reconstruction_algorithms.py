@@ -103,7 +103,7 @@ class GradientReconstructor():
                     break
         except KeyboardInterrupt:
             print('Trial procedure manually interruped.')
-            pass
+            exit(0)
 
         # Choose optimal result:
         if self.config['scoring_choice'] in ['pixelmean', 'pixelmedian']:
@@ -361,10 +361,14 @@ def reconstruction_costs(gradients, input_gradient, cost_fn='l2', indices='def',
     ex = input_gradient[0]
     if weights == 'linear':
         weights = torch.arange(len(input_gradient), 0, -1, dtype=ex.dtype, device=ex.device) / len(input_gradient)
+        # weights = torch.arange(0,len(input_gradient), 1, dtype=ex.dtype, device=ex.device) / len(input_gradient)
     elif weights == 'exp':
-        weights = torch.arange(len(input_gradient), 0, -1, dtype=ex.dtype, device=ex.device)
+        # weights = torch.arange(len(input_gradient), 0, -1, dtype=ex.dtype, device=ex.device)
+        # weights = weights.softmax(dim=0)
+        # weights = weights / weights[0]
+        weights = torch.arange(0, len(input_gradient), 1, dtype=ex.dtype, device=ex.device)
         weights = weights.softmax(dim=0)
-        weights = weights / weights[0]
+        weights = weights / weights[-1]
     else:
         weights = input_gradient[0].new_ones(len(input_gradient))
     cnt = 0

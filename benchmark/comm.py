@@ -30,7 +30,12 @@ import random
 from pathlib import Path
 
 
-policies = policy.policies
+replace = True
+if replace:
+    policies = policy.policies_replace
+    print('Warning: using replace policies, make sure use it correctly')
+else:
+    policies = policy.policies
 
 
 def create_model(opt):
@@ -41,7 +46,8 @@ def create_model(opt):
         model, _ = inversefed.construct_model(arch, num_classes=10, num_channels=1)
     elif opt.data == 'ImageNet':
         model, _ = inversefed.construct_model(arch, num_classes=25, num_channels=3)
-    elif opt.data in ['CelebA_Gender', 'CelebA_Smile', 'CelebAHQ_Gender']: #Binary classification
+    # elif opt.data in ['CelebA_Gender', 'CelebA_Smile', 'CelebAHQ_Gender']: #Binary classification
+    elif 'Gender' in opt.data or 'Smile' in opt.data: #Binary classification
         model, _ = inversefed.construct_model(arch, num_classes=2, num_channels=3)
     elif opt.data == 'CelebA_Identity': #Identity classification
         model, _ = inversefed.construct_model(arch, num_classes=500, num_channels=3)
@@ -136,7 +142,8 @@ def build_transform(normalize=True, policy_list=list(), opt=None, defs=None):
     elif opt.data == 'ImageNet':
         #TODO use constant or recompute the mean and std ?
         data_mean, data_std = inversefed.consts.imagenet_mean, inversefed.consts.imagenet_std
-    elif opt.data.startswith('CelebA'):
+    # elif opt.data.startswith('CelebA'):
+    elif 'CelebA' in opt.data:
         data_mean, data_std = inversefed.consts.celeba_mean, inversefed.consts.celeba_std
     else:
         raise NotImplementedError
@@ -165,12 +172,23 @@ def build_transform(normalize=True, policy_list=list(), opt=None, defs=None):
         transform_list = [transforms.Resize(256),
                             transforms.CenterCrop(224)]
         
+        # transform_list = [transforms.Resize(128),
+        #                     transforms.CenterCrop(112)]
         if len(policy_list) > 0 and mode == 'aug':
             transform_list.append(construct_policy(policy_list))
 
     elif opt.data == 'CelebAHQ_Gender':
         transform_list = [transforms.Resize((256, 256))]
-        
+        if len(policy_list) > 0 and mode == 'aug':
+            transform_list.append(construct_policy(policy_list))
+
+    elif opt.data.startswith('Scale_CelebAHQ_Gender'):
+        size = opt.data.split('_')[-1]
+        if size.isdigit():
+            size = (int(size), int(size))
+        else:
+            raise AttributeError(f'Error scale size, exptectd a number but got {size} ')
+        transform_list = [transforms.Resize(size)]
         if len(policy_list) > 0 and mode == 'aug':
             transform_list.append(construct_policy(policy_list))
 
@@ -480,6 +498,39 @@ def preprocess(opt, defs, valid=False):
 
         loss_fn, trainloader, validloader =  inversefed.construct_dataloaders('CelebAHQ_Gender', defs)
         trainset, validset = _build_celeba_hq_gender('~/data/')
+
+        if len(opt.aug_list) > 0:
+            policy_list = split(opt.aug_list)
+        else:
+            policy_list = []
+        if not valid:
+            trainset.transform = build_transform(True, policy_list, opt, defs)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=128,
+                    shuffle=True, drop_last=True, num_workers=24, pin_memory=True)
+        if opt.tiny_data:
+            print('Use tiny dataset')
+            defs.validate=10
+        # 10% data sample
+            subset_indices = torch.randperm(len(trainset))[:int(0.1*len(trainset))]
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+                        drop_last=False, num_workers=16, pin_memory=True, sampler=torch.utils.data.sampler.SubsetRandomSampler(subset_indices))
+
+        if valid:
+            validset.transform = build_transform(True, policy_list, opt, defs)
+        validloader = torch.utils.data.DataLoader(validset, batch_size=128,
+                shuffle=False, drop_last=True, num_workers=16, pin_memory=True)
+
+        return loss_fn, trainloader, validloader
+    elif opt.data.startswith('Scale_CelebAHQ_Gender'):
+
+        loss_fn, trainloader, validloader =  inversefed.construct_dataloaders(opt.data, defs)
+
+        size = opt.data.split('_')[-1]
+        if size.isdigit():
+            size = (int(size), int(size))
+        else:
+            raise AttributeError(f'Error scale size, exptectd a number but got {size} ')
+        trainset, validset = _build_celeba_hq_gender('~/data/', size=size)
 
         if len(opt.aug_list) > 0:
             policy_list = split(opt.aug_list)
