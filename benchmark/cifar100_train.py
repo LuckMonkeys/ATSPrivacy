@@ -27,7 +27,13 @@ from benchmark.comm import create_model, build_transform, preprocess, create_con
 
 
 
-policies = policy.policies
+replace = True
+if replace:
+    policies = policy.policies_replace
+    print('Warning: using replace policies, make sure use it correctly')
+    # exit(0)
+else:
+    policies = policy.policies
 
 parser = argparse.ArgumentParser(description='Reconstruct some image from a trained model.')
 parser.add_argument('--arch', default=None, required=True, type=str, help='Vision model.')
@@ -40,6 +46,7 @@ parser.add_argument('--evaluate', default=False, type=bool, help='Evaluate')
 
 parser.add_argument('--defense', default=None, type=str, help='Existing Defenses')
 parser.add_argument('--tiny_data', default=False, action='store_true', help='Use 0.1 training dataset')
+parser.add_argument('--scale_data', default=False, action='store_true', help='Use scale data for single dataset')
 
 opt = parser.parse_args()
 
@@ -57,6 +64,12 @@ assert mode in ['normal', 'aug', 'crop']
 def create_save_dir():
     if opt.tiny_data:
         return 'checkpoints/tiny_data_{}_arch_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.mode, opt.aug_list, opt.rlabel)
+    elif opt.scale_data:
+        name_and_size = opt.data.split('_')
+        name = '_'.join(name_and_size[1:-1])
+        size = name_and_size[-1]
+        save_dir = f'checkpoints/scale_{name}/data_{name}_arch_{opt.arch}_mode_{opt.mode}_auglist_{opt.aug_list}_rlabel_{opt.rlabel}_{size}'
+        return save_dir
     return 'checkpoints/data_{}_arch_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.mode, opt.aug_list, opt.rlabel)
 
 

@@ -9,6 +9,9 @@ from .metrics import InceptionScore
 from .medianfilt import MedianPool2d
 from copy import deepcopy
 
+import torchvision
+import os
+
 import time
 
 DEFAULT_CONFIG = dict(signed=False,
@@ -60,7 +63,7 @@ class GradientReconstructor():
         self.loss_fn = loss_fn
         self.iDLG = True
 
-    def reconstruct(self, input_data, labels, img_shape=(3, 32, 32), dryrun=False, eval=True, tol=None):
+    def reconstruct(self, input_data, labels, img_shape=(3, 32, 32), dryrun=False, eval=True, tol=None, init_data=None, save_verbose=False, save_dir=None):
         """Reconstruct image from gradient."""
         start_time = time.time()
         if eval:
@@ -69,6 +72,12 @@ class GradientReconstructor():
 
         stats = defaultdict(list)
         x = self._init_images(img_shape)
+        
+        #use specific init data: need to normalized 
+        if init_data is not None:
+            #init data do not include restart and batch info
+            x.data[:, :] = init_data.data.clone().to(**self.setup)
+        
         scores = torch.zeros(self.config['restarts'])
 
         if labels is None:
@@ -93,7 +102,7 @@ class GradientReconstructor():
 
         try:
             for trial in range(self.config['restarts']):
-                x_trial, labels = self._run_trial(x[trial], input_data, labels, dryrun=dryrun)
+                x_trial, labels = self._run_trial(x[trial], input_data, labels, dryrun=dryrun, save_verbose=save_verbose, save_dir=save_dir)
                 # Finalize
                 scores[trial] = self._score_trial(x_trial, input_data, labels)
                 x[trial] = x_trial
@@ -130,7 +139,7 @@ class GradientReconstructor():
         else:
             raise ValueError()
 
-    def _run_trial(self, x_trial, input_data, labels, dryrun=False):
+    def _run_trial(self, x_trial, input_data, labels, dryrun=False, save_verbose=False, save_dir=None):
         x_trial.requires_grad = True
         if self.reconstruct_label:
             output_test = self.model(x_trial)
@@ -173,8 +182,14 @@ class GradientReconstructor():
                     if self.config['boxed']:
                         x_trial.data = torch.max(torch.min(x_trial, (1 - dm) / ds), -dm / ds)
 
-                    if (iteration + 1 == max_iterations) or iteration % 500 == 0:
+                    if (iteration + 1 == max_iterations) or iteration % 100 == 0:
                         print(f'It: {iteration}. Rec. loss: {rec_loss.item():2.4f}.', flush=True)
+                        
+                        #save intermediate result
+                        if save_verbose:
+                            output_denormalized = x_trial * ds + dm
+                            torchvision.utils.save_image(output_denormalized.cpu().clone(), f'{save_dir}/{iteration}.png')
+                        
 
                     if (iteration + 1) % 500 == 0:
                         if self.config['filter'] == 'none':
