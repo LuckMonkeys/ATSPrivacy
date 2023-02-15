@@ -36,7 +36,7 @@ conda activate ats
 python -u searchalg/batch_generate.py  --arch=ResNet20-4 --data=cifar100 > batch_generate.sh
 bash batch_generate.sh
 python -u searchalg/search_best.py --arch=ResNet20-4 --data=cifar100
-```
+``` w
 
 ### Step3 Privacy-Perserving Evaluation
 ```
@@ -60,3 +60,9 @@ We express gratitudes to the great work [Inverting Gradients](https://github.com
 
 # License
 This repository is released under the MIT license. 
+
+Steps to add new datasets
+1. [optinal] add new datasets implimentation in datasets.py 
+2. set correct function in data_processing.py for each dataset name
+3. For Attack, set the dataset single image shape, and may need to set the save dir
+4. For train, set the checkpoint save dir 
