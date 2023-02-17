@@ -8,6 +8,9 @@ from .metrics import total_variation as TV
 from .metrics import InceptionScore
 from .medianfilt import MedianPool2d
 from copy import deepcopy
+import os
+import torchvision
+from .metrics import FeatureRegularization
 
 import time
 
@@ -24,7 +27,8 @@ DEFAULT_CONFIG = dict(signed=False,
                       init='randn',
                       filter='none',
                       lr_decay=True,
-                      scoring_choice='loss')
+                      scoring_choice='loss',
+                      feature_loss=0)
 
 def _label_to_onehot(target, num_classes=100):
     target = torch.unsqueeze(target, 1)
@@ -60,7 +64,7 @@ class GradientReconstructor():
         self.loss_fn = loss_fn
         self.iDLG = True
 
-    def reconstruct(self, input_data, labels, img_shape=(3, 32, 32), dryrun=False, eval=True, tol=None):
+    def reconstruct(self, input_data, labels, img_shape=(3, 32, 32), dryrun=False, eval=True, tol=None, init_data=None, save_verbose=False, save_dir=None):
         """Reconstruct image from gradient."""
         start_time = time.time()
         if eval:
@@ -69,6 +73,15 @@ class GradientReconstructor():
 
         stats = defaultdict(list)
         x = self._init_images(img_shape)
+
+        # print(x.shape, init_data.shape)
+        # exit(0)
+        #use specific init data: need to normalized 
+        if init_data is not None:
+            
+            #init data do not include restart and batch info
+            x.data[:, :] = init_data.data.clone().to(**self.setup)
+
         scores = torch.zeros(self.config['restarts'])
 
         if labels is None:
@@ -93,7 +106,7 @@ class GradientReconstructor():
 
         try:
             for trial in range(self.config['restarts']):
-                x_trial, labels = self._run_trial(x[trial], input_data, labels, dryrun=dryrun)
+                x_trial, labels = self._run_trial(x[trial], input_data, labels, dryrun=dryrun, save_verbose=save_verbose, save_dir=save_dir)
                 # Finalize
                 scores[trial] = self._score_trial(x_trial, input_data, labels)
                 x[trial] = x_trial
@@ -130,7 +143,7 @@ class GradientReconstructor():
         else:
             raise ValueError()
 
-    def _run_trial(self, x_trial, input_data, labels, dryrun=False):
+    def _run_trial(self, x_trial, input_data, labels, dryrun=False, save_verbose=False, save_dir=None):
         x_trial.requires_grad = True
         if self.reconstruct_label:
             output_test = self.model(x_trial)
@@ -154,6 +167,10 @@ class GradientReconstructor():
             else:
                 raise ValueError()
 
+        #add feature regularization
+        feature_loss_fn = FeatureRegularization(None, scale=1)
+        feature_loss_fn.initialize(models=[self.model], input_gradient=input_data[0], labels=labels)
+
         max_iterations = self.config['max_iterations']
         dm, ds = self.mean_std
         if self.config['lr_decay']:
@@ -163,8 +180,9 @@ class GradientReconstructor():
                                                                          max_iterations // 1.142], gamma=0.1)   # 3/8 5/8 7/8
         try:
             for iteration in range(max_iterations):
-                closure = self._gradient_closure(optimizer, x_trial, input_data, labels)
+                closure = self._gradient_closure(optimizer, x_trial, input_data, labels, feature_loss_fn=feature_loss_fn)
                 rec_loss = optimizer.step(closure)
+                # feature_loss = feature_loss_fn()
                 if self.config['lr_decay']:
                     scheduler.step()
 
@@ -173,8 +191,20 @@ class GradientReconstructor():
                     if self.config['boxed']:
                         x_trial.data = torch.max(torch.min(x_trial, (1 - dm) / ds), -dm / ds)
 
-                    if (iteration + 1 == max_iterations) or iteration % 500 == 0:
-                        print(f'It: {iteration}. Rec. loss: {rec_loss.item():2.4f}.', flush=True)
+                    if (iteration + 1 == max_iterations) or iteration % 1000 == 0:
+                        
+                        #save intermediate result
+                        if save_verbose:
+                            subdir = os.path.join(save_dir, str(save_verbose))
+                            if not os.path.exists(subdir):
+                                os.makedirs(subdir)
+                            # print(subdir)
+                            # exit(0)
+                         
+                            output_denormalized = x_trial * ds + dm
+                            torchvision.utils.save_image(output_denormalized.cpu().clone(), f'{subdir}/{iteration}.png')
+
+                        print(f'It: {iteration}. Rec. loss: {rec_loss.item():2.4f}. Task loss: {self.current_task_loss:2.4f}. TV loss:{self.tv_loss:2.4f}. Feature loss:{self.feature_loss:2.4f}', flush=True)
 
                     if (iteration + 1) % 500 == 0:
                         if self.config['filter'] == 'none':
@@ -191,7 +221,7 @@ class GradientReconstructor():
             pass
         return x_trial.detach(), labels
 
-    def _gradient_closure(self, optimizer, x_trial, input_gradient, label):
+    def _gradient_closure(self, optimizer, x_trial, input_gradients, label, feature_loss_fn=None):
 
         def closure():
             optimizer.zero_grad()
@@ -199,11 +229,32 @@ class GradientReconstructor():
             loss = self.loss_fn(self.model(x_trial), label)
             param_list = [param for param in self.model.parameters() if param.requires_grad]
             gradient = torch.autograd.grad(loss, param_list, create_graph=True)
-            rec_loss = reconstruction_costs([gradient], input_gradient,
+            rec_loss = 0
+
+            # if isinstance(input_gradient, list):
+            #     # the weight for each gradient los
+            #     #current equal
+            #     for g in input_gradient:
+            #         rec_loss += reconstruction_costs([gradient], g,
+            #                                         cost_fn=self.config['cost_fn'], indices=self.config['indices'],
+            #                                         weights=self.config['weights'])
+
+            rec_loss = reconstruction_costs([gradient], input_gradients,
                                             cost_fn=self.config['cost_fn'], indices=self.config['indices'],
                                             weights=self.config['weights'])
+            self.current_task_loss = loss.detach()
+            # print(rec_loss, self.config['total_variation'] * TV(x_trial))
+            # exit(0)
             if self.config['total_variation'] > 0:
                 rec_loss += self.config['total_variation'] * TV(x_trial)
+                self.tv_loss = self.config['total_variation'] * TV(x_trial)
+            if self.config["feature_loss"] > 0:
+                feature_loss = feature_loss_fn()
+                rec_loss += self.config["feature_loss"] * feature_loss
+                self.feature_loss = feature_loss
+            else:
+                self.feature_loss = float('nan')
+                
             rec_loss.backward()
             if self.config['signed']:
                 x_trial.grad.sign_()
@@ -327,20 +378,20 @@ def loss_steps(model, inputs, labels, loss_fn=torch.nn.CrossEntropyLoss(), lr=1e
     return list(patched_model.parameters.values())
 
 
-def reconstruction_costs(gradients, input_gradient, cost_fn='l2', indices='def', weights='equal'):
+def reconstruction_costs(gradients, input_gradients, cost_fn='l2', indices='def', weights='equal'):
     """Input gradient is given data."""
     if isinstance(indices, list):
         pass
     elif indices == 'def':
-        indices = torch.arange(len(input_gradient))
+        indices = torch.arange(len(input_gradients[0]))
     elif indices == 'batch':
-        indices = torch.randperm(len(input_gradient))[:8]
+        indices = torch.randperm(len(input_gradients[0]))[:8]
     elif indices == 'topk-1':
-        _, indices = torch.topk(torch.stack([p.norm() for p in input_gradient], dim=0), 4)
+        _, indices = torch.topk(torch.stack([p.norm() for p in input_gradients[0]], dim=0), 4)
     elif indices == 'top10':
-        _, indices = torch.topk(torch.stack([p.norm() for p in input_gradient], dim=0), 10)
+        _, indices = torch.topk(torch.stack([p.norm() for p in input_gradients[0]], dim=0), 10)
     elif indices == 'top50':
-        _, indices = torch.topk(torch.stack([p.norm() for p in input_gradient], dim=0), 50)
+        _, indices = torch.topk(torch.stack([p.norm() for p in input_gradients[0]], dim=0), 50)
     elif indices in ['first', 'first4']:
         indices = torch.arange(0, 4)
     elif indices == 'first5':
@@ -350,68 +401,71 @@ def reconstruction_costs(gradients, input_gradient, cost_fn='l2', indices='def',
     elif indices == 'first50':
         indices = torch.arange(0, 50)
     elif indices == 'last5':
-        indices = torch.arange(len(input_gradient))[-5:]
+        indices = torch.arange(len(input_gradients[0]))[-5:]
     elif indices == 'last10':
-        indices = torch.arange(len(input_gradient))[-10:]
+        indices = torch.arange(len(input_gradients[0]))[-10:]
     elif indices == 'last50':
-        indices = torch.arange(len(input_gradient))[-50:]
+        indices = torch.arange(len(input_gradients[0]))[-50:]
     else:
         raise ValueError()
 
-    ex = input_gradient[0]
+    ex = input_gradients[0][0]
     if weights == 'linear':
-        weights = torch.arange(len(input_gradient), 0, -1, dtype=ex.dtype, device=ex.device) / len(input_gradient)
+        weights = torch.arange(len(input_gradients[0]), 0, -1, dtype=ex.dtype, device=ex.device) / len(input_gradients[0])
     elif weights == 'exp':
-        weights = torch.arange(len(input_gradient), 0, -1, dtype=ex.dtype, device=ex.device)
+        weights = torch.arange(len(input_gradients[0]), 0, -1, dtype=ex.dtype, device=ex.device)
         weights = weights.softmax(dim=0)
         weights = weights / weights[0]
     else:
-        weights = input_gradient[0].new_ones(len(input_gradient))
+        weights = input_gradients[0][0].new_ones(len(input_gradients[0]))
     cnt = 0
     total_costs = 0
     for trial_gradient in gradients:
-        pnorm = [0, 0]
-        costs = 0
-        if indices == 'topk-2':
-            _, indices = torch.topk(torch.stack([p.norm().detach() for p in trial_gradient], dim=0), 4)
-        for i in indices:
-            if cost_fn == 'l2':
-                costs += ((trial_gradient[i] - input_gradient[i]).pow(2)).sum() * weights[i]
-                cnt = 1
-            elif cost_fn == 'l1':
-                costs += ((trial_gradient[i] - input_gradient[i]).abs()).sum() * weights[i]
-                cnt = 1
-            elif cost_fn == 'max':
-                costs += ((trial_gradient[i] - input_gradient[i]).abs()).max() * weights[i]
-                cnt = 1
-            elif cost_fn == 'sim':
-                costs -= (trial_gradient[i] * input_gradient[i]).sum() * weights[i]
-                pnorm[0] += trial_gradient[i].pow(2).sum() * weights[i]
-                pnorm[1] += input_gradient[i].pow(2).sum() * weights[i]
-                cnt = 1
-            elif cost_fn == 'out_sim':
-                if len(trial_gradient[i].shape) >= 2:
-                    for j in range(trial_gradient[i].shape[0]):
-                        costs += 1 - torch.nn.functional.cosine_similarity(trial_gradient[i][j].flatten(),
-                                                                   input_gradient[i][j].flatten(),
-                                                                   0, 1e-10) * weights[i]
+        for input_gradient in input_gradients:
+            pnorm = [0, 0]
+            costs = 0
+            if indices == 'topk-2':
+                _, indices = torch.topk(torch.stack([p.norm().detach() for p in trial_gradient], dim=0), 4)
+            for i in indices:
+                if cost_fn == 'l2':
+                    l2_scale = 1.0
+                    costs += ((trial_gradient[i] - input_gradient[i]).pow(2)).sum() * weights[i] * l2_scale
+                    cnt = 1
+                elif cost_fn == 'l1':
+                    costs += ((trial_gradient[i] - input_gradient[i]).abs()).sum() * weights[i]
+                    cnt = 1
+                elif cost_fn == 'max':
+                    costs += ((trial_gradient[i] - input_gradient[i]).abs()).max() * weights[i]
+                    cnt = 1
+                elif cost_fn == 'sim':
+                    # costs -= (trial_gradient[i] * (input_gradient[i] + torch.randn_like(input_gradient[i]) * 0.001)).sum() * weights[i]
+                    costs -= (trial_gradient[i] * input_gradient[i]).sum() * weights[i]
+                    pnorm[0] += trial_gradient[i].pow(2).sum() * weights[i]
+                    pnorm[1] += input_gradient[i].pow(2).sum() * weights[i]
+                    cnt = 1
+                elif cost_fn == 'out_sim':
+                    if len(trial_gradient[i].shape) >= 2:
+                        for j in range(trial_gradient[i].shape[0]):
+                            costs += 1 - torch.nn.functional.cosine_similarity(trial_gradient[i][j].flatten(),
+                                                                       input_gradient[i][j].flatten(),
+                                                                       0, 1e-10) * weights[i]
+                            cnt += 1
+                    else:
+                        costs += 1 - torch.nn.functional.cosine_similarity(trial_gradient[i].flatten(),
+                                                                       input_gradient[i].flatten(),
+                                                                       0, 1e-10) * weights[i]
                         cnt += 1
-                else:
+                    # print(sim_out.item())
+                elif cost_fn == 'simlocal':
                     costs += 1 - torch.nn.functional.cosine_similarity(trial_gradient[i].flatten(),
-                                                                   input_gradient[i].flatten(),
-                                                                   0, 1e-10) * weights[i]
-                    cnt += 1
-                # print(sim_out.item())
-            elif cost_fn == 'simlocal':
-                costs += 1 - torch.nn.functional.cosine_similarity(trial_gradient[i].flatten(),
-                                                                   input_gradient[i].flatten(),
-                                                                   0, 1e-10) * weights[i]
-        if cost_fn == 'sim':
-            # costs = 1 + costs / pnorm[0].sqrt() / pnorm[1].sqrt()
-            norm = max(pnorm[0].sqrt() * pnorm[1].sqrt(), torch.tensor(1e-8, device=pnorm[0].device))
-            costs = 1 + costs / norm
-        # Accumulate final costs
-        total_costs += costs / cnt
+                                                                       input_gradient[i].flatten(),
+                                                                       0, 1e-10) * weights[i]
+            if cost_fn == 'sim':
+                # costs = 1 + costs / pnorm[0].sqrt() / pnorm[1].sqrt()
+                norm = max(pnorm[0].sqrt() * pnorm[1].sqrt(), torch.tensor(1e-8, device=pnorm[0].device))
+                costs = 1 + costs / norm
+            # Accumulate final costs
+            total_costs += costs / cnt
     # print(type(gradients), len(gradients), type(gradients[0]), type(total_costs))
     if torch.isinf(total_costs):
         print('inf', cost_fn, costs, cnt)

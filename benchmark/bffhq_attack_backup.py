@@ -198,6 +198,13 @@ def main():
             dm = torch.Tensor([0.1307]).view(1, 1, 1).cuda()
             ds = torch.Tensor([0.3081]).view(1, 1, 1).cuda()
             shape = (1, 32, 32)
+        elif opt.data == "bFFHQ_Gender":
+            if inversefed.consts.celeba_mean is None:
+                print("please provide the mean and std for dataset")
+                exit(0)
+            dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
+            ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
+            shape = (3, 112, 112)
         else:
             raise NotImplementedError
     else: 

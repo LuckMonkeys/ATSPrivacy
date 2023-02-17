@@ -6,7 +6,7 @@ import torch
 import numpy as np
 import torchvision
 import inversefed
-from inversefed.data.data_processing import _build_cifar100, _get_meanstd, _build_imagenet, _build_celeba_gender, _build_celeba_identity, _build_celeba_mlabel, _build_celeba_smile, _build_celeba_face_align_mlabel
+from inversefed.data.data_processing import _build_cifar100, _get_meanstd, _build_imagenet, _build_celeba_gender, _build_celeba_identity, _build_celeba_mlabel, _build_celeba_smile, _build_celeba_face_align_mlabel, _build_celebahq_gender, _build_bffhq_gender
 import torchvision.transforms as transforms
 from torchvision.transforms import (CenterCrop, 
                                     Compose, 
@@ -29,8 +29,15 @@ from transformers import ViTFeatureExtractor
 import random
 from pathlib import Path
 
+from inversefed.data.datasets import get_condensation_Dataset
 
-policies = policy.policies
+replace = False
+if replace:
+    policies = policy.policies_replace
+    print('Warning: using replace policies, make sure use it correctly')
+    exit(0)
+else:
+    policies = policy.policies
 
 
 def create_model(opt):
@@ -41,7 +48,7 @@ def create_model(opt):
         model, _ = inversefed.construct_model(arch, num_classes=10, num_channels=1)
     elif opt.data == 'ImageNet':
         model, _ = inversefed.construct_model(arch, num_classes=25, num_channels=3)
-    elif opt.data in ['CelebA_Gender', 'CelebA_Smile']: #Binary classification
+    elif opt.data in ['CelebA_Gender', 'CelebA_Smile', "CelebAHQ_Gender"]: #Binary classification
         model, _ = inversefed.construct_model(arch, num_classes=2, num_channels=3)
     elif opt.data == 'CelebA_Identity': #Identity classification
         model, _ = inversefed.construct_model(arch, num_classes=500, num_channels=3)
@@ -49,6 +56,14 @@ def create_model(opt):
         model, _ = inversefed.construct_model(arch, num_classes=40, num_channels=3)
     elif opt.data == 'CelebAFaceAlign_MLabel': #Multilabel classification
         model, _ = inversefed.construct_model(arch, num_classes=40, num_channels=3)
+    elif opt.data in ['DM_FashionMinist', 'DC_FashionMinist', 'DSA_FashionMinist']:
+        model, _ = inversefed.construct_model(arch, num_classes=10, num_channels=1)
+    elif opt.data in ['DP_MERF_FashionMinist']:
+        model, _ = inversefed.construct_model(arch, num_classes=10, num_channels=1)
+    elif opt.data in ['GS_WGAN_FashionMinist']:
+        model, _ = inversefed.construct_model(arch, num_classes=10, num_channels=1)
+    elif opt.data == "bFFHQ_Gender":
+        model, _ = inversefed.construct_model(arch, num_classes=2, num_channels=3)
     return model
 
 
@@ -60,6 +75,10 @@ class sub_transform:
     def __call__(self, img):
         idx = np.random.randint(0, len(self.policy_list))
         select_policy = self.policy_list[idx]
+        
+        #randomly shuffle select_policy
+        random.shuffle(select_policy)
+         
         for policy_id in select_policy:
             img = policies[policy_id](img)
         return img
@@ -138,6 +157,8 @@ def build_transform(normalize=True, policy_list=list(), opt=None, defs=None):
         data_mean, data_std = inversefed.consts.imagenet_mean, inversefed.consts.imagenet_std
     elif opt.data.startswith('CelebA'):
         data_mean, data_std = inversefed.consts.celeba_mean, inversefed.consts.celeba_std
+    elif opt.data == "bFFHQ_Gender":
+        data_mean, data_std = inversefed.consts.bFFHQ_mean, inversefed.consts.bFFHQ_std
     else:
         raise NotImplementedError
 
@@ -161,6 +182,7 @@ def build_transform(normalize=True, policy_list=list(), opt=None, defs=None):
         transform_list.append(lambda x: transforms.functional.to_grayscale(x, num_output_channels=1))
         transform_list.append(transforms.Resize(32))
 
+
     elif opt.data == 'ImageNet':
         transform_list = [transforms.Resize(256),
                             transforms.CenterCrop(224)]
@@ -170,10 +192,18 @@ def build_transform(normalize=True, policy_list=list(), opt=None, defs=None):
 
     elif opt.data.startswith('CelebA'):
         # transform_list = [transforms.Resize((128, 128))]
-        transform_list = [transforms.Resize((112, 112))]
+        # transform_list = [transforms.Resize((112, 112))]
+        transform_list = [transforms.Resize((opt.size, opt.size))]
         
         if len(policy_list) > 0 and mode == 'aug':
             transform_list.append(construct_policy(policy_list))
+    
+    elif opt.data == "bFFHQ_Gender":
+        transform_list = [transforms.Resize((opt.size, opt.size))]
+        
+        if len(policy_list) > 0 and mode == 'aug':
+            transform_list.append(construct_policy(policy_list))
+
     print(transform_list)
 
 
@@ -470,7 +500,125 @@ def preprocess(opt, defs, valid=False):
                 shuffle=False, drop_last=True, num_workers=16, pin_memory=True)
 
         return loss_fn, trainloader, validloader
+    
+    elif opt.data in ['DM_FashionMinist', 'DC_FashionMinist', 'DSA_FashionMinist']:
+        #only for attack
+        loss_fn, _, _ =  inversefed.construct_dataloaders('CIFAR100', defs)
+        validset = get_condensation_Dataset(data_path=f'/home/zx/nfs/server3/ATSPrivacy/dataset_condensation/{opt.data}_{opt.arch}/data.pt')
 
+        tlist = list()
+        #saved data type tensor and alreadly normalized
+        transform=transforms.Compose([
+           transforms.Resize(32),
+           ])
+
+        # validset.transform = build_transform(True, tlist, opt, defs)
+        validset.transform = transform
+
+        validloader = torch.utils.data.DataLoader(validset, batch_size=defs.batch_size,
+                shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
+        
+        trainloader=None
+
+        return loss_fn, trainloader, validloader
+
+    elif opt.data in ['DP_MERF_FashionMinist', 'GS_WGAN_FashionMinist']:
+
+        loss_fn, _, _ =  inversefed.construct_dataloaders('CIFAR100', defs)
+        # for training
+        if not valid:
+            trainset = get_condensation_Dataset(data_path=f'/home/zx/nfs/server3/ATSPrivacy/dataset_condensation/{opt.data}/data.pt')
+            # trainset = get_condensation_Dataset(data_path=f'/home/zx/ATSPrivacy/dataset_condensation/{opt.data}/data.pt')
+            transform=transforms.Compose([
+               transforms.Resize(32),
+               transforms.Normalize((0.1307,), (0.3081,))
+               ])
+            trainset.transform = transform
+            
+            validset = torchvision.datasets.FashionMNIST('~/data', train=False, download=True,
+                           transform=transforms.Compose([
+                               transforms.Resize(32),
+                               transforms.ToTensor(),
+                               transforms.Normalize((0.1307,), (0.3081,))
+                           ]))
+
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=defs.batch_size,
+                    shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
+            validloader = torch.utils.data.DataLoader(validset, batch_size=defs.batch_size,
+                    shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
+        else:
+            #only for attack
+            validset = get_condensation_Dataset(data_path=f'/home/zx/nfs/server3/ATSPrivacy/dataset_condensation/{opt.data}/data.pt')
+            # validset = get_condensation_Dataset(data_path=f'/home/zx/ATSPrivacy/dataset_condensation/{opt.data}/test.pt')
+
+            #saved data type tensor and do normalize
+            transform=transforms.Compose([
+               transforms.Resize(32),
+               transforms.Normalize((0.1307,), (0.3081,))
+               ])
+
+            validset.transform = transform
+            validloader = torch.utils.data.DataLoader(validset, batch_size=defs.batch_size,
+                    shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
+            
+            trainloader=None
+
+        return loss_fn, trainloader, validloader
+
+    elif opt.data == 'CelebAHQ_Gender':
+
+        loss_fn, trainloader, validloader =  inversefed.construct_dataloaders('CelebAHQ_Gender', defs)
+        trainset, validset = _build_celebahq_gender('~/data/')
+
+        if len(opt.aug_list) > 0:
+            policy_list = split(opt.aug_list)
+        else:
+            policy_list = []
+        if not valid:
+            trainset.transform = build_transform(True, policy_list, opt, defs)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=128,
+                    shuffle=True, drop_last=True, num_workers=24, pin_memory=True)
+        if opt.tiny_data:
+            print('Use tiny dataset')
+            defs.validate=10
+        # 10% data sample
+            subset_indices = torch.randperm(len(trainset))[:int(0.1*len(trainset))]
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+                        drop_last=False, num_workers=16, pin_memory=True, sampler=torch.utils.data.sampler.SubsetRandomSampler(subset_indices))
+
+        if valid:
+            validset.transform = build_transform(True, policy_list, opt, defs)
+        validloader = torch.utils.data.DataLoader(validset, batch_size=128,
+                shuffle=False, drop_last=True, num_workers=16, pin_memory=True)
+
+        return loss_fn, trainloader, validloader
+    elif opt.data == "bFFHQ_Gender":
+        
+        loss_fn, trainloader, validloader =  inversefed.construct_dataloaders('bFFHQ_Gender', defs)
+        trainset, validset = _build_bffhq_gender('~/data/')
+
+        if len(opt.aug_list) > 0:
+            policy_list = split(opt.aug_list)
+        else:
+            policy_list = []
+        if not valid:
+            trainset.transform = build_transform(True, policy_list, opt, defs)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=128,
+                    shuffle=True, drop_last=True, num_workers=24, pin_memory=True)
+        if opt.tiny_data:
+            print('Use tiny dataset')
+            defs.validate=10
+        # 10% data sample
+            subset_indices = torch.randperm(len(trainset))[:int(0.1*len(trainset))]
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+                        drop_last=False, num_workers=16, pin_memory=True, sampler=torch.utils.data.sampler.SubsetRandomSampler(subset_indices))
+
+        if valid:
+            validset.transform = build_transform(True, policy_list, opt, defs)
+        validloader = torch.utils.data.DataLoader(validset, batch_size=128,
+                shuffle=False, drop_last=True, num_workers=16, pin_memory=True)
+
+        return loss_fn, trainloader, validloader
     else:
         raise NotImplementedError
 
@@ -608,6 +756,23 @@ def create_config(opt):
         config = dict(signed=True,
                 boxed=True,
                 cost_fn='sim',
+                indices='def',
+                weights='equal',
+                lr=0.1,
+                optim='adam',
+                restarts=1,
+                # max_iterations=100, #debug
+                max_iterations=4800,
+                total_variation=1e-1,
+                init='randn',
+                filter='none',
+                lr_decay=True,
+                scoring_choice='loss',
+                feature_loss=0)
+    elif opt.optim == 'inversed-adam-L2_large':
+        config = dict(signed=True,
+                boxed=True,
+                cost_fn='l2',
                 indices='def',
                 weights='equal',
                 lr=0.1,

@@ -17,6 +17,12 @@ data/*
 checkpoints/*
 tiny_benchmark/*
 
+benchmark/images/*
+scale_CelebAHQ_Gender/*
+
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -152,4 +158,5 @@ dmypy.json
 *.zip
 
 scripts/
+
 

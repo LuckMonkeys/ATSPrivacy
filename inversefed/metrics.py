@@ -104,3 +104,55 @@ def activation_errors(model, x1, x2):
         raise
 
     return data
+
+class _LinearFeatureHook:
+    """Hook to retrieve input to given module."""
+
+    def __init__(self, module):
+        self.features = None
+        self.hook = module.register_forward_hook(self.hook_fn)
+
+    def hook_fn(self, module, input, output):
+        input_features = input[0]
+        self.features = input_features
+
+    def close(self):
+        self.hook.remove()
+
+class FeatureRegularization(torch.nn.Module):
+    """Feature regularization implemented for the last linear layer at the end."""
+
+    def __init__(self, setup, scale=0.1):
+        super().__init__()
+        self.setup = setup
+        self.scale = scale
+
+    def initialize(self, models, input_gradient, labels, *args, **kwargs):
+        self.measured_features = []
+        # Assume last two gradient vector entries are weight and bias:
+        weights = input_gradient[-2]
+        bias = input_gradient[-1]
+        grads_fc_debiased = weights / bias[:, None]
+        features_per_label = []
+        for label in labels:
+            if bias[label] != 0:
+                features_per_label.append(grads_fc_debiased[label])
+            else:
+                features_per_label.append(torch.zeros_like(grads_fc_debiased[0]))
+        self.measured_features.append(torch.stack(features_per_label))
+
+        self.refs = [None for model in models]
+        for idx, model in enumerate(models):
+            for module in model.modules():
+                # Keep only the last linear layer here:
+                if isinstance(module, torch.nn.Linear):
+                    self.refs[idx] = _LinearFeatureHook(module)
+
+    def forward(self, *args, **kwargs):
+        regularization_value = 0
+        for ref, measured_val in zip(self.refs, self.measured_features):
+            regularization_value += (ref.features - measured_val).pow(2).mean()
+        return regularization_value * self.scale
+
+    def __repr__(self):
+        return f"Feature space regularization, scale={self.scale}"

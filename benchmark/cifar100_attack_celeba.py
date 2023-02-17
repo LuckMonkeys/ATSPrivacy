@@ -43,8 +43,23 @@ parser.add_argument('--dryrun', default=False, action='store_true', help='Debug 
 parser.add_argument('--fix_ckpt', default=False, action='store_true', help='Use fix ckpt for attack')
 
 
-##add for dataset condensation
+parser.add_argument('--save_verbose', default=False, action='store_true', help='Save intermediate result')
+parser.add_argument('--init_sameattr', default=False, action='store_true', help='Initialize data from same attribute image')
 
+parser.add_argument("--noise_gradients", default=0, type=float, help="The sigma of guassian noise added to real gradients")
+
+parser.add_argument('--size', default=112, type=int, help='The shape of celeba image')
+parser.add_argument('--num_samples', default=5, type=int, help='The number of sample')
+
+
+
+
+#same attr image
+SAME_ATTR_IMAGES = {2:[1805, 13651, 19220], 8:[2663, 18391], 13:[480, 10173, 17614], 17:[8191], 19:[612, 4646, 19530], 21:[2315, 3830, 15227, 19810], 22:[6734, 11157], 24:[10209], 28:[6359, 15890], 29:[951, 2925, 5447, 7615, 11413, 13189, 16585], 30:[10790, 18696, 19482] }
+
+RANDOM_ATTR_IMAGES = {2:[1805, 13651, 19220], 8:[2663, 18391], 13:[480, 10173, 17614], 17:[8191], 19:[612, 4646, 19530], 21:[2315, 3830, 15227, 19810], 22:[6734, 11157], 24:[10209], 28:[6359, 15890], 29:[951, 2925, 5447, 7615, 11413, 13189, 16585], 30:[10790, 18696, 19482] }
+
+#  2:[1805, 13651, 19220], [8, 2663, 18391], [480, 10173, 17614], [17, 8191], [18, 10179], [19, 612, 4646, 19530], [2315, 3830, 15227, 19810], [22, 6734, 11157], [24, 10209], [28, 6359, 15890], [29, 951, 2925, 5447, 7615, 11413, 13189, 16585], [30, 10790, 18696, 19482], [33, 5475, 7118, 8560, 11810], [38, 1515, 14041], [41, 1571, 4857, 9355], [43, 9432, 9830, 17125, 18948]
 
 opt = parser.parse_args()
 num_images = 1
@@ -69,14 +84,23 @@ def collate_fn(examples, label_key='fine_label'):
     return {"pixel_values": pixel_values, "labels": labels}
 
 def create_save_dir():
+    
     if opt.fix_ckpt:
         return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_fix'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
             opt.aug_list, opt.rlabel)
+    
+    if opt.save_verbose:
+        if opt.init_sameattr:
+            return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_verbose_initSameAttr'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
+            opt.aug_list, opt.rlabel)
+        return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_verbose'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
+        opt.aug_list, opt.rlabel)
+     
     return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
         opt.aug_list, opt.rlabel)
 
 
-def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, label_key):
+def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, label_key, init_index=None):
 
     dm, ds = mean_std
     # prepare data
@@ -110,21 +134,50 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
         ground_truth = torch.stack(ground_truth)
 
     labels = torch.cat(labels)
+    
     model.zero_grad()
     target_loss = loss_fn(model(ground_truth), labels)
     param_list = [param for param in model.parameters() if param.requires_grad]
     input_gradient = torch.autograd.grad(target_loss, param_list)
+    input_gradients = [input_gradient]
+
+    #attempts to add noise_gradients to real gradients
+    if opt.noise_gradients != 0:
+        noise_g = [g + torch.randn_like(g)*opt.noise_gradients for g in input_gradient]
+        input_gradients.append(noise_g)
+    print("length of input gradients", len(input_gradients))
 
 
     # attack
     print('ground truth label is ', labels)
+    
+    
+    #create save dir if not exist 
+    save_dir = create_save_dir()
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    save_verbose = None 
+    if opt.save_verbose is not None:
+        save_verbose = idx 
+    
     #pass loss_fn that accepts tuple input
     rec_machine = inversefed.GradientReconstructor(model, (dm, ds), config, num_images=num_images, loss_fn=loss_fn)
 
     if opt.rlabel:
-        output, stats = rec_machine.reconstruct(input_gradient, None, img_shape=shape) # reconstruction label
+        output, stats = rec_machine.reconstruct(input_gradients, None, img_shape=shape) # reconstruction label
     else:
-        output, stats = rec_machine.reconstruct(input_gradient, labels, img_shape=shape, dryrun=opt.dryrun) # specify label
+        init_data = None
+        if init_index is not None:
+            init_data, label = validloader.dataset[init_index]
+
+            init_data_denormalized = init_data.clone().to(**setup) * ds + dm
+            torchvision.utils.save_image(init_data_denormalized.cpu().clone(), f"{save_dir}/init_{idx}.png")
+        
+        # print("obtian init data from input")
+        # exit(0)
+
+        output, stats = rec_machine.reconstruct(input_gradients, labels, img_shape=shape, dryrun=opt.dryrun, init_data=init_data, save_verbose=save_verbose, save_dir=save_dir) # specify label
         # output, stats = rec_machine.reconstruct(input_gradient, labels, img_shape=shape, dryrun=True) # specify label
 
     output_denormalized = output * ds + dm
@@ -132,9 +185,6 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
     mean_loss = torch.mean((input_denormalized - output_denormalized) * (input_denormalized - output_denormalized))
     print("after optimization, the true mse loss {}".format(mean_loss))
 
-    save_dir = create_save_dir()
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
 
     torchvision.utils.save_image(output_denormalized.cpu().clone(), '{}/rec_{}.png'.format(save_dir, idx))
     torchvision.utils.save_image(input_denormalized.cpu().clone(), '{}/ori_{}.png'.format(save_dir, idx))
@@ -159,6 +209,9 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
 def create_checkpoint_dir():
     if opt.fix_ckpt:
         return 'checkpoints/data_{}_arch_{}_mode_crop_auglist__rlabel_{}'.format(opt.data, opt.arch, opt.rlabel)
+    if opt.data == "CelebAHQ_Gender":
+        return f'checkpoints/scale_CelebAHQ_Gender/data_{opt.data}_arch_{opt.arch}_mode_crop_auglist__rlabel_{opt.rlabel}_{opt.size}'
+        
     return 'checkpoints/data_{}_arch_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.mode, opt.aug_list, opt.rlabel)
 
 
@@ -181,6 +234,10 @@ def main():
             dm = torch.as_tensor(inversefed.consts.imagenet_mean, **setup)[:, None, None]
             ds = torch.as_tensor(inversefed.consts.imagenet_std, **setup)[:, None, None]
             shape = (3, 224, 224)
+        elif opt.data.startswith("CelebAHQ"):
+            dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
+            ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
+            shape = (3, opt.size, opt.size)
         elif opt.data.startswith('CelebA'):
             dm = torch.as_tensor(inversefed.consts.celeba_mean, **setup)[:, None, None]
             ds = torch.as_tensor(inversefed.consts.celeba_std, **setup)[:, None, None]
@@ -242,6 +299,8 @@ def main():
     model.eval()
 
     save_dir = create_save_dir()
+    # print(save_dir)
+    # exit(0)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     metric_list = list()
@@ -250,7 +309,7 @@ def main():
     if os.path.exists(metric_path):
         metric_list = np.load(metric_path, allow_pickle=True).tolist()
 
-    sample_list = [i for i in range(100)]
+    sample_list = [i for i in range(opt.num_samples)]
 
     if opt.arch ==  'ResNet18_tv' and opt.data == 'ImageNet':
         valid_size = len(validloader.dataset)
@@ -271,12 +330,18 @@ def main():
     #     print(inputs.shape, labels.shape)
     #     break
     # exit(0)
+    
+    if opt.init_sameattr:
+        sample_list = list(SAME_ATTR_IMAGES.keys())
     mse_loss = 0
     for attack_id, idx in enumerate(sample_list):
         if idx < opt.resume:
             continue
         print('attach {}th in {}'.format(idx, opt.aug_list))
-        metric = reconstruct(idx, model, loss_fn, trainloader, validloader, (dm, ds), shape, label_key)
+        if opt.init_sameattr:
+            metric = reconstruct(idx, model, loss_fn, trainloader, validloader, (dm, ds), shape, label_key, init_index=SAME_ATTR_IMAGES[idx][0])
+        else:
+            metric = reconstruct(idx, model, loss_fn, trainloader, validloader, (dm, ds), shape, label_key, init_index=None)
         metric_list.append(metric)
         #save metric after each reconstruction
         np.save('{}/metric.npy'.format(save_dir), metric_list)

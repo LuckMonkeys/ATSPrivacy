@@ -11,7 +11,7 @@ from ..consts import *
 
 from .data import _build_bsds_sr, _build_bsds_dn
 from .loss import Classification, PSNR
-from .datasets import CelebAForGender, CelebAForMLabel, CelebAForSmile, CelebAFaceAlignForMLabel
+from .datasets import CelebAForGender, CelebAForMLabel, CelebAForSmile, CelebAFaceAlignForMLabel, CelebAHQForGender, bFFHQForGender
 
 
 def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, normalize=True):
@@ -36,6 +36,9 @@ def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, norma
     elif dataset == 'CelebA_Gender':
         trainset, validset = _build_celeba_gender(path, defs.augmentations, normalize)
         loss_fn = Classification()
+    elif dataset == 'CelebAHQ_Gender':
+        trainset, validset = _build_celebahq_gender(path, defs.augmentations, normalize)
+        loss_fn = Classification()
     elif dataset == 'CelebA_Smile':
         trainset, validset = _build_celeba_smile(path, defs.augmentations, normalize)
         loss_fn = Classification()
@@ -48,6 +51,9 @@ def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, norma
     elif dataset == 'CelebAFaceAlign_MLabel':
         trainset, validset = _build_celeba_face_align_mlabel(path, defs.augmentations, normalize)
         loss_fn = torch.nn.BCEWithLogitsLoss()
+    elif dataset == "bFFHQ_Gender":
+        trainset, validset = _build_bffhq_gender(path, defs.augmentations, normalize)
+        loss_fn = Classification()
     elif dataset == 'BSDS-SR':
         trainset, validset = _build_bsds_sr(path, defs.augmentations, normalize, upscale_factor=3, RGB=True)
         loss_fn = PSNR()
@@ -366,9 +372,10 @@ def _build_celeba_mlabel(data_path, augmentations=True, normalize=True):
 def _build_celeba_face_align_mlabel(data_path, augmentations=True, normalize=True):
     """Define celeba with everything considered."""
     # Load data
-    data_path = data_path if not os.path.exists('/home/zx/nfs/server3/data/celeba') else '/home/zx/nfs/server3/data/celeba'
+    data_path = data_path if not os.path.exists('/home/zx/nfs/server3/data/') else '/home/zx/nfs/server3/data/'
 
     # data_path = '/home/zx/data/'
+    # print(data_path)
     trainset = CelebAFaceAlignForMLabel(data_path, split='train', transform=transforms.ToTensor())
     validset = CelebAFaceAlignForMLabel(data_path, split='valid', transform=transforms.ToTensor())
 
@@ -397,8 +404,85 @@ def _build_celeba_face_align_mlabel(data_path, augmentations=True, normalize=Tru
 
     return trainset, validset
 
+def _build_celebahq_gender(data_path, augmentations=True, normalize=True):
+    """Define celeba with everything considered."""
+    # Load data
+    # trainset = torchvision.datasets.ImageNet(root=data_path, split='train', transform=transforms.ToTensor())
+    # validset = torchvision.datasets.ImageNet(root=data_path, split='val', transform=transforms.ToTensor())
+
+    # data_path = data_path if not os.path.exists('/home/zx/nfs/server3/data/') else '/home/zx/nfs/server3/data/'
+    data_path = "/home/zx/data" if not os.path.exists('/home/zx/nfs/server3/data/') else '/home/zx/nfs/server3/data/'
+    # data_path = '/home/zx/data'
+    trainset = CelebAHQForGender(data_path, split='train', transform=transforms.ToTensor())
+    validset = CelebAHQForGender(data_path, split='valid', transform=transforms.ToTensor())
+
+    if celeba_mean is None:
+        data_mean, data_std = _get_meanstd(trainset)
+    else:
+        data_mean, data_std = celeba_mean, celeba_std
+
+    # Organize preprocessing
+    transform = transforms.Compose([
+        # transforms.Resize((128,128)),
+        transforms.Resize((112,112)),
+        # transforms.CenterCrop(128),
+        transforms.ToTensor(),
+        transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
+    if augmentations:
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(128),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
+        trainset.transform = transform_train
+    else:
+        trainset.transform = transform
+    validset.transform = transform
+
+    return trainset, validset
+
+def _build_bffhq_gender(data_path, augmentations=True, normalize=True):
+    """Define celeba with everything considered."""
+    # Load data
+    # trainset = torchvision.datasets.ImageNet(root=data_path, split='train', transform=transforms.ToTensor())
+    # validset = torchvision.datasets.ImageNet(root=data_path, split='val', transform=transforms.ToTensor())
+
+    # data_path = data_path if not os.path.exists('/home/zx/nfs/server3/data/') else '/home/zx/nfs/server3/data/'
+    data_path = "/home/zx/data" if not os.path.exists('/home/zx/nfs/server3/data/') else '/home/zx/nfs/server3/data/'
+    # data_path = '/home/zx/data'
+    trainset = bFFHQForGender(data_path, split='train', transform=transforms.ToTensor())
+    validset = bFFHQForGender(data_path, split='valid', transform=transforms.ToTensor())
+
+    if bFFHQ_mean is None:
+        data_mean, data_std = _get_meanstd(trainset)
+        print("mean\n", data_mean)
+        print("std\n", data_std)
+        exit(0)
+    else:
+        data_mean, data_std = bFFHQ_mean, bFFHQ_std
+
+    # Organize preprocessing
+    transform = transforms.Compose([
+        # transforms.Resize((128,128)),
+        transforms.Resize((112,112)),
+        # transforms.CenterCrop(128),
+        transforms.ToTensor(),
+        transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
+    if augmentations:
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(112),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(data_mean, data_std) if normalize else transforms.Lambda(lambda x : x)])
+        trainset.transform = transform_train
+    else:
+        trainset.transform = transform
+    validset.transform = transform
+
+    return trainset, validset
+
 def _get_meanstd(dataset):
-    cc = torch.cat([trainset[i][0].reshape(3, -1) for i in range(len(trainset))], dim=1)
+    cc = torch.cat([dataset[i][0].reshape(3, -1) for i in range(len(dataset))], dim=1)
     data_mean = torch.mean(cc, dim=1).tolist()
     data_std = torch.std(cc, dim=1).tolist()
     return data_mean, data_std

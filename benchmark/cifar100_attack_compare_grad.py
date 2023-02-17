@@ -42,9 +42,20 @@ parser.add_argument('--tiny_data', default=False, action='store_true', help='Use
 parser.add_argument('--dryrun', default=False, action='store_true', help='Debug mode')
 parser.add_argument('--fix_ckpt', default=False, action='store_true', help='Use fix ckpt for attack')
 
+parser.add_argument('--save_verbose', default=False, action='store_true', help='Save intermediate result')
+parser.add_argument('--init_sameattr', default=False, action='store_true', help='Initialize data from same attribute image')
 
-##add for dataset condensation
+parser.add_argument('--grad_loss', default="MSE", type=str, help="The grad loss fn")
 
+
+
+
+
+
+#same attr image
+SAME_ATTR_IMAGES = {2:[1805, 13651, 19220], 8:[2663, 18391], 13:[480, 10173, 17614], 17:[8191], 19:[612, 4646, 19530], 21:[2315, 3830, 15227, 19810], 22:[6734, 11157], 24:[10209], 28:[6359, 15890], 29:[951, 2925, 5447, 7615, 11413, 13189, 16585], 30:[10790, 18696, 19482] }
+
+#  2:[1805, 13651, 19220], [8, 2663, 18391], [480, 10173, 17614], [17, 8191], [18, 10179], [19, 612, 4646, 19530], [2315, 3830, 15227, 19810], [22, 6734, 11157], [24, 10209], [28, 6359, 15890], [29, 951, 2925, 5447, 7615, 11413, 13189, 16585], [30, 10790, 18696, 19482], [33, 5475, 7118, 8560, 11810], [38, 1515, 14041], [41, 1571, 4857, 9355], [43, 9432, 9830, 17125, 18948]
 
 opt = parser.parse_args()
 num_images = 1
@@ -69,14 +80,51 @@ def collate_fn(examples, label_key='fine_label'):
     return {"pixel_values": pixel_values, "labels": labels}
 
 def create_save_dir():
+    
     if opt.fix_ckpt:
         return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_fix'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
             opt.aug_list, opt.rlabel)
+    
+    if opt.save_verbose:
+        if opt.init_sameattr:
+            return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_verbose_initSameAttr'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
+            opt.aug_list, opt.rlabel)
+        return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}_verbose'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
+        opt.aug_list, opt.rlabel)
+     
     return 'benchmark/images/data_{}_arch_{}_epoch_{}_optim_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.epochs, opt.optim, opt.mode, \
         opt.aug_list, opt.rlabel)
 
+def get_grad(model, loss_fn, input, labels):
+    model.zero_grad()
+    target_loss = loss_fn(model(input), labels)
+    param_list = [param for param in model.parameters() if param.requires_grad]
+    input_gradient = torch.autograd.grad(target_loss, param_list)
+    return input_gradient
 
-def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, label_key):
+def cos_sim(x,y):
+    product = (x*y).sum()
+    norm = max(x.pow(2).sum().sqrt() * y.pow(2).sum().sqrt(), torch.tensor(1e-8, device=x.device))
+
+    return 1 - product/norm
+
+def cos_sim_local(x,y):
+
+    return 1 - torch.nn.functional.cosine_similarity(x.flatten(),
+                                                     y.flatten(),
+                                                     0, 1e-10)
+
+def grad_loss_lookup(loss_name):
+    if loss_name == "MSE":
+        return torch.nn.MSELoss(reduction="mean")
+    elif loss_name == "sim":
+        return cos_sim
+    elif loss_name == "sim_local":
+        return cos_sim_local
+    else:
+        raise NotImplementedError(f"{loss_name} grad loss funciton not implemented ")
+    
+def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, label_key, init_index=None):
 
     dm, ds = mean_std
     # prepare data
@@ -110,55 +158,38 @@ def reconstruct(idx, model, loss_fn, trainloader, validloader, mean_std, shape, 
         ground_truth = torch.stack(ground_truth)
 
     labels = torch.cat(labels)
-    model.zero_grad()
-    target_loss = loss_fn(model(ground_truth), labels)
-    param_list = [param for param in model.parameters() if param.requires_grad]
-    input_gradient = torch.autograd.grad(target_loss, param_list)
+    
+    gt_gradient = get_grad(model=model, loss_fn=loss_fn, input=ground_truth, labels=labels )    # 
 
-
-    # attack
-    print('ground truth label is ', labels)
-    #pass loss_fn that accepts tuple input
-    rec_machine = inversefed.GradientReconstructor(model, (dm, ds), config, num_images=num_images, loss_fn=loss_fn)
-
-    if opt.rlabel:
-        output, stats = rec_machine.reconstruct(input_gradient, None, img_shape=shape) # reconstruction label
-    else:
-        output, stats = rec_machine.reconstruct(input_gradient, labels, img_shape=shape, dryrun=opt.dryrun) # specify label
-        # output, stats = rec_machine.reconstruct(input_gradient, labels, img_shape=shape, dryrun=True) # specify label
-
-    output_denormalized = output * ds + dm
-    input_denormalized = ground_truth * ds + dm
-    mean_loss = torch.mean((input_denormalized - output_denormalized) * (input_denormalized - output_denormalized))
-    print("after optimization, the true mse loss {}".format(mean_loss))
-
+    #create save dir if not exist 
     save_dir = create_save_dir()
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    torchvision.utils.save_image(output_denormalized.cpu().clone(), '{}/rec_{}.png'.format(save_dir, idx))
-    torchvision.utils.save_image(input_denormalized.cpu().clone(), '{}/ori_{}.png'.format(save_dir, idx))
+    if opt.save_verbose:
+        rec_path = os.path.join(save_dir, f"{idx}", "4799.png") 
+    else: 
+        rec_path = os.path.join(save_dir, f"rec_{idx}.png") 
+
+    rec = Image.open(rec_path)
+    rec_t = validloader.dataset.transform(rec).unsqueeze(0).to(**setup)
 
 
-    test_mse = (output_denormalized.detach() - input_denormalized).pow(2).mean().cpu().detach().numpy()
-    if isinstance(model(output.detach()), tuple): 
-        feat_mse = (model(output.detach())[0]- model(ground_truth)[0]).pow(2).mean()
-    else:
-        feat_mse = (model(output.detach())- model(ground_truth)).pow(2).mean()
-         
-    test_psnr = inversefed.metrics.psnr(output_denormalized, input_denormalized)
+    rec_gradient = get_grad(model=model, loss_fn=loss_fn, input=rec_t, labels=labels )    # 
+    
+    grad_loss = grad_loss_lookup(opt.grad_loss)
 
-    return {'test_mse': test_mse,
-        'feat_mse': feat_mse.detach(), # if not, the computation graph would store in list for each iteration, case OOM error. https://discuss.pytorch.org/t/memory-leak-when-appending-tensors-to-a-list/25937 If you store something from your model (for debugging purpose) and don’t need to calculate gradients with it anymore, I would recommend to call detach on it as it won’t have any effects if the tensor is already detached.
-        'test_psnr': test_psnr
-    }
+    loss_list = []
+    for g_gt, g_rec in zip(gt_gradient, rec_gradient):
+        loss_list.append(grad_loss(g_gt, g_rec).detach())
 
-
+    return torch.stack(loss_list)
 
 
 def create_checkpoint_dir():
     if opt.fix_ckpt:
         return 'checkpoints/data_{}_arch_{}_mode_crop_auglist__rlabel_{}'.format(opt.data, opt.arch, opt.rlabel)
+        
     return 'checkpoints/data_{}_arch_{}_mode_{}_auglist_{}_rlabel_{}'.format(opt.data, opt.arch, opt.mode, opt.aug_list, opt.rlabel)
 
 
@@ -242,13 +273,9 @@ def main():
     model.eval()
 
     save_dir = create_save_dir()
+
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    metric_list = list()
-    #resume
-    metric_path = save_dir + '/metric.npy'
-    if os.path.exists(metric_path):
-        metric_list = np.load(metric_path, allow_pickle=True).tolist()
 
     sample_list = [i for i in range(100)]
 
@@ -261,27 +288,24 @@ def main():
         valid_size = len(validloader.dataset)
         sample_array = np.linspace(0, valid_size, 100, endpoint=False,dtype=np.int32)
         sample_list = [int(i) for i in sample_array]
-        # print(sample_list)
-        # exit(0)
-        # sample_list = [25] #debug
-    # input, label = validloader.dataset[0] 
-    # print(validloader.dataset.transform)
-    # print(input.shape, label)
-    # for inputs, labels in validloader:
-    #     print(inputs.shape, labels.shape)
-    #     break
-    # exit(0)
-    mse_loss = 0
+    
+    if opt.init_sameattr:
+        sample_list = list(SAME_ATTR_IMAGES.keys())
+
+    loss_list = []
     for attack_id, idx in enumerate(sample_list):
         if idx < opt.resume:
             continue
         print('attach {}th in {}'.format(idx, opt.aug_list))
-        metric = reconstruct(idx, model, loss_fn, trainloader, validloader, (dm, ds), shape, label_key)
-        metric_list.append(metric)
-        #save metric after each reconstruction
-        np.save('{}/metric.npy'.format(save_dir), metric_list)
-
-
+        if opt.init_sameattr:
+            loss = reconstruct(idx, model, loss_fn, trainloader, validloader, (dm, ds), shape, label_key, init_index=SAME_ATTR_IMAGES[idx][0])
+        else:
+            loss = reconstruct(idx, model, loss_fn, trainloader, validloader, (dm, ds), shape, label_key, init_index=None)
+        # print(loss.shape, loss)
+        loss_list.append(loss)
+    
+    total_loss = torch.stack(loss_list)
+    torch.save(total_loss, f"layer_grad_compare/{opt.arch}_{opt.data}_{opt.grad_loss}.pt")
 
 if __name__ == '__main__':
     main()
